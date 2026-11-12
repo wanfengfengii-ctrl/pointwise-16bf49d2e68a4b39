@@ -1,0 +1,26 @@
+[
+  {
+    "id": "a",
+    "rev": 1,
+    "station": "east",
+    "day": 0,
+    "value": 10,
+    "deleted": false
+  },
+  {
+    "id": "b",
+    "rev": 1,
+    "station": "west",
+    "day": 0,
+    "value": 7,
+    "deleted": false
+  },
+  {
+    "id": "c",
+    "rev": 1,
+    "station": "east",
+    "day": 0,
+    "value": 5,
+    "deleted": false
+  }
+]
