@@ -2,8 +2,19 @@
 import hashlib
 import json
 import sqlite3
+from pathlib import Path
 
 NODES = ("raw", "clean", "daily")
+
+STORE_DDL = """
+CREATE TABLE IF NOT EXISTS identity(
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  network TEXT NOT NULL, node TEXT NOT NULL, head INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS frames(
+  seq INTEGER PRIMARY KEY, clock TEXT NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS receipts(
+  request TEXT PRIMARY KEY, digest TEXT NOT NULL, seq INTEGER NOT NULL);
+"""
 
 
 def canonical(value):
@@ -15,8 +26,35 @@ def digest(value):
     return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
 
 
+def protection_floors(root):
+    """Ops metadata hook: per-node minimum protected frame seq, or None.
+
+    Written by the ops backup component as <root>/ops-protect.json. Frames at
+    or above a floor are needed by an accepted, not yet committed backup task
+    and must survive trim; once the task commits the entry is removed and
+    ordinary retention applies again. A corrupt file fails safe (protect all).
+    """
+    try:
+        data = json.loads((Path(root) / "ops-protect.json").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return dict.fromkeys(NODES)
+    except (ValueError, OSError):
+        return dict.fromkeys(NODES, 0)
+    floors = dict.fromkeys(NODES)
+    tasks = data.get("tasks") if isinstance(data, dict) else None
+    if isinstance(tasks, dict):
+        for entry in tasks.values():
+            if not isinstance(entry, dict):
+                continue
+            for node in NODES:
+                value = entry.get(node)
+                if type(value) is int:
+                    floors[node] = value if floors[node] is None else min(floors[node], value)
+    return floors
+
+
 class Store:
-    def __init__(self, connection, node, network):
+    def __init__(self, connection, node, network, protect=None):
         if node not in NODES or not isinstance(network, str) or not network:
             raise ValueError("BAD_IDENTITY")
         self.db = connection
@@ -25,15 +63,7 @@ class Store:
         self.db.execute("PRAGMA busy_timeout=3000")
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
-        self.db.executescript("""
-        CREATE TABLE IF NOT EXISTS identity(
-          singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-          network TEXT NOT NULL, node TEXT NOT NULL, head INTEGER NOT NULL);
-        CREATE TABLE IF NOT EXISTS frames(
-          seq INTEGER PRIMARY KEY, clock TEXT NOT NULL, data TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS receipts(
-          request TEXT PRIMARY KEY, digest TEXT NOT NULL, seq INTEGER NOT NULL);
-        """)
+        self.db.executescript(STORE_DDL)
         self.db.execute("BEGIN IMMEDIATE")
         try:
             ident = self.db.execute("SELECT network,node FROM identity").fetchone()
@@ -49,6 +79,7 @@ class Store:
             raise
         self.node = node
         self.network = network
+        self.protect = protect
 
     def snapshot(self, seq=None):
         # One SELECT: head, data and cumulative dependency vector are atomic.
@@ -100,7 +131,12 @@ class Store:
         self.db.execute("BEGIN IMMEDIATE")
         try:
             head = self.db.execute("SELECT head FROM identity").fetchone()[0]
-            self.db.execute("DELETE FROM frames WHERE seq < ?", (max(0, head - keep + 1),))
+            bound = max(0, head - keep + 1)
+            # History-protection hook: frames at or above the floor are needed
+            # by an accepted backup task and stay until the task commits.
+            if self.protect is not None:
+                bound = min(bound, self.protect)
+            self.db.execute("DELETE FROM frames WHERE seq < ?", (bound,))
             self.db.commit()
         except BaseException:
             self.db.rollback()
@@ -180,16 +216,16 @@ class Pipeline:
 
 
 def open_pipeline(root, network=None):
-    from pathlib import Path
     root = Path(root)
     if network is None:
         network = json.loads((root / "network.json").read_text(encoding="utf-8"))["network"]
     root.mkdir(parents=True, exist_ok=True)
+    floors = protection_floors(root)
     stores = {}
     try:
         for node in NODES:
             stores[node] = Store(sqlite3.connect(str(root / (node + ".sqlite"))),
-                                 node, network)
+                                 node, network, floors[node])
         return Pipeline(stores)
     except BaseException:
         for store in stores.values():

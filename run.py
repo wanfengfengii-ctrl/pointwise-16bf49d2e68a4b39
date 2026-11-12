@@ -34,8 +34,10 @@ def main():
     sub.add_parser("demo")
     args = parser.parse_args()
     if args.command == "demo":
-        from checks import memory_pipeline
-        pipeline = memory_pipeline()
+        import sqlite3
+        from pipeline import Pipeline, Store
+        pipeline = Pipeline(
+            {n: Store(sqlite3.connect(":memory:"), n, "sample-water") for n in NODES})
     else:
         root = Path(args.root)
         if args.command == "init":

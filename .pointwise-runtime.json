@@ -10,7 +10,6 @@
   "demo": [
     "python3",
     "-B",
-    "run.py",
-    "demo"
+    "demo.py"
   ]
 }
